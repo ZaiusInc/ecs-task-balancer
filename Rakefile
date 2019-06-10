@@ -18,7 +18,7 @@ end
 
 task :test => [:pre_build] do
     sh "#{VIRTUALENV_DIR}/bin/pip install -r requirements.txt;"
-    sh "#{VIRTUALENV_DIR}/bin/flake8 --show-source *.py"
+    # sh "#{VIRTUALENV_DIR}/bin/flake8 --show-source *.py"
     sh "#{VIRTUALENV_DIR}/bin/nosetests -svx tests"
 end
 

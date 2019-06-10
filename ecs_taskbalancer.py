@@ -5,6 +5,8 @@ import time
 import json
 import logging
 from datetime import datetime
+import boto3
+from dateutil.tz import tzlocal
 
 import aws
 
@@ -64,29 +66,41 @@ def get_stats(values):
     cov = compute_coefficient_of_variation(mean, sd)
     return mean, sd, cov
 
+def get_container_availability_zone(container):
+    attributes = container.get('attributes')
+    availability_zone_list = list(filter(lambda x: x['name'] == 'ecs.availability-zone', attributes))
+    availability_zone = availability_zone_list[0]['value']
+    return availability_zone
 
 def get_num_task_distribution(region, cluster):
     """ Gets task distribution over container instances sorted by most tasks.
 
-    Returns: sortedlist[
-        {
-            "instance_id": "...",
-            "container_instance_arn": "...",
-            "num_tasks": 133
-        }
-    ]
+    Returns: 
+        { availabilityZone : sortedlist[
+            {
+                "instance_id": "...",
+                "container_instance_arn": "...",
+                "num_tasks": 133
+            }
+        ]}
     """
-    dist = []
+    dist_list = {}
+
     container_instances = aws.get_container_instances(
         region, cluster_name=cluster, status=aws.STATUS_ACTIVE
     )
     # Loop through all container instances in the cluster
     # Get container instance ARN and running tasks + pending tasks
     for i in container_instances:
-        instance_id = i["ec2InstanceId"]
+        instance_id = i["ec2InstanceId"] 
         container_instance_arn = i["containerInstanceArn"]
         num_tasks = i["runningTasksCount"] + i["pendingTasksCount"]
-        dist.append(
+        availability_zone = get_container_availability_zone(i)
+
+        if availability_zone not in dist_list:
+            dist_list[availability_zone] = []
+
+        dist_list[availability_zone].append(
             {
                 "instance_id": instance_id,
                 "container_instance_arn": container_instance_arn,
@@ -95,8 +109,9 @@ def get_num_task_distribution(region, cluster):
         )
 
     # Sort by most task count
-    sorted_dist = sorted(dist, key=lambda k: k["num_tasks"], reverse=True)
-    return sorted_dist
+    for dist in dist_list.values():
+        dist = sorted(dist, key=lambda k: k["num_tasks"], reverse=True)
+    return dist_list
 
 
 def drain_instance(region, cluster, mean, num_tasks,
@@ -152,10 +167,12 @@ def drain_instance(region, cluster, mean, num_tasks,
     log.info("Stopping draining of {}".format(instance_arn))
     resp = aws.update_container_instance_draining(
         region, cluster, instance_arn, status=aws.STATUS_ACTIVE
-    )
+    )[0]
+
     log.info("Draining stopped of {} with {} tasks left".format(
         instance_arn, resp["runningTasksCount"])
     )
+
 
 
 def try_rebalancing_cluster(region, cluster, sleep_time, drain_timeout,
@@ -166,7 +183,17 @@ def try_rebalancing_cluster(region, cluster, sleep_time, drain_timeout,
 
     Drain only until `drain_max_instances` or `max_retries`.
     """
+    dist_list = get_num_task_distribution(region, cluster)
 
+    # Try rebalance dists in each availability zone
+    for availability_zone, dist in dist_list.items():
+        try_rebalancing_single_availability_zone(region, cluster, sleep_time, drain_timeout,
+                                drain_max_instances, max_retries, cov_percent, dist, availability_zone)
+
+
+def try_rebalancing_single_availability_zone(region, cluster, sleep_time, drain_timeout,
+                            drain_max_instances, max_retries, cov_percent, dist, availability_zone):
+    
     # Keep track of number of instances drained
     # This should not exceed `drain_max_instances`
     instance_count = 0
@@ -174,13 +201,11 @@ def try_rebalancing_cluster(region, cluster, sleep_time, drain_timeout,
     # Keep track how many times we're draining to rebalance the cluster
     # This should not exceed max_retries.
     retry_count = 0
-
     while True:
-
         # Get task distribution over instance for this cluster
-        dist = get_num_task_distribution(region, cluster)
         dist_values = [d["num_tasks"] for d in dist]
-        if len(dist_values) == 0:
+
+        if len(dist_values) <= 1:
             log.info("No task distribution available")
             return
 
@@ -208,7 +233,7 @@ def try_rebalancing_cluster(region, cluster, sleep_time, drain_timeout,
         instance_arn = dist[0]["container_instance_arn"]
         num_tasks = dist[0]["num_tasks"]
         drain_instance(region, cluster, mean, num_tasks,
-                       instance_arn, sleep_time, drain_timeout)
+                    instance_arn, sleep_time, drain_timeout)
 
         # Check if we have exceeded max draining instances
         instance_count += 1
@@ -237,6 +262,10 @@ def try_rebalancing_cluster(region, cluster, sleep_time, drain_timeout,
         # It takes a while for the number of tasks to be recomputed.
         log.info("Sleeping for a bit b/w drainage ...")
         time.sleep(60)
+
+        # Update distrubution list for specific availability zone
+        dist = get_num_task_distribution(region, cluster)[availability_zone]
+
 
 
 def main(event, context):
@@ -286,10 +315,14 @@ def main(event, context):
     cluster_names = aws.list_clusters(region)
     log.info("Clusters {} Found".format(cluster_names))
 
+    fixed_names = set(['zproduction', 'staging', 'panamax_Batch_d55c7005-8e06-3e8c-b2a4-e10a83f2933e', 'staccato-batch-staging_Batch_f112f7fd-4713-3755-b5d8-697dbef7a8b3', 'staccato-batch-production_Batch_500c82dc-c060-30d7-a653-a3d5567c8fff', 'panamax-prod2_Batch_6c4ee36b-36fb-38e5-b3b1-261fc4763964'])
+
     # Try rebalancing one cluster at a time
     for cluster in cluster_names:
-        try_rebalancing_cluster(region, cluster, sleep_time, drain_timeout,
-                                drain_max_instances, max_retries, cov_percent)
+        if cluster not in fixed_names:
+            try_rebalancing_cluster(region, cluster, sleep_time, drain_timeout,
+                                    drain_max_instances, max_retries, cov_percent)
+        
 
 
 if __name__ == '__main__':
