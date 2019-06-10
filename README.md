@@ -1,6 +1,10 @@
 # ECS  Tasks Rebalancer
 This program is a lazy best effort tasks rebalancer in ECS intended to run periodically as a lambda function. It's job is to lazily rebalance ecs tasks across a cluster in a best effort mechansim.
 
+## Zaius Changes
+* Tasks are now organzed by availability zone
+* The test file was modified to mimic our use case and changes
+
 
 ## How it works
 
