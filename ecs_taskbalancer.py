@@ -38,6 +38,9 @@ REBALANCE_MAX_RETRY = 3
 # Acceptable coefficient of variation
 COV_PERCENT = 25
 
+# Default cluster names - just an empty list, to not accidently run this on unintended clusters
+CLUSTER_NAMES = []
+
 
 def compute_mean(arr):
     """ Compute mean """
@@ -312,14 +315,14 @@ def main(event, context):
     ))
 
     # Get all clusters
-    cluster_names = aws.list_clusters(region)
+    all_clusters = set(aws.list_clusters(region))
+
+    cluster_names = [os.environ.get("CLUSTER_NAMES").split(" ")]
     log.info("Clusters {} Found".format(cluster_names))
-
-    fixed_names = set(['zproduction', 'staging', 'panamax_Batch_d55c7005-8e06-3e8c-b2a4-e10a83f2933e', 'staccato-batch-staging_Batch_f112f7fd-4713-3755-b5d8-697dbef7a8b3', 'staccato-batch-production_Batch_500c82dc-c060-30d7-a653-a3d5567c8fff', 'panamax-prod2_Batch_6c4ee36b-36fb-38e5-b3b1-261fc4763964'])
-
+    
     # Try rebalancing one cluster at a time
     for cluster in cluster_names:
-        if cluster not in fixed_names:
+        if cluster in all_clusters:
             try_rebalancing_cluster(region, cluster, sleep_time, drain_timeout,
                                     drain_max_instances, max_retries, cov_percent)
         
